@@ -24,7 +24,11 @@ function openDB() {
 }
 const rq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const store = (n, m = 'readonly') => db.transaction(n, m).objectStore(n);
-const dbPut = (n, v) => rq(store(n, 'readwrite').put(v));
+const dbPut = (n, v, quiet) => {
+  const r = rq(store(n, 'readwrite').put(v));
+  if (!quiet && (n === 'items' || n === 'boards') && window.Sync) Sync.touch();   // avisa a la sincronización
+  return r;
+};
 const dbAll = n => rq(store(n).getAll());
 const dbGet = (n, k) => rq(store(n).get(k));
 const dbDel = (n, k) => rq(store(n, 'readwrite').delete(k));
@@ -49,8 +53,9 @@ async function blobURL(id) {
 }
 
 /* ---------- Pizarras ---------- */
-async function newBoard(name) {
+async function newBoard(name, auto) {
   const b = { id: uid(), name: name || 'Nueva pizarra', created: now(), updated: now(), view: { x: 0, y: 0, k: 1 } };
+  if (auto) b.auto = true;   // pizarra inicial automática
   boards.push(b);
   await dbPut('boards', b);
   return b;
@@ -130,7 +135,7 @@ function saveViewNow() {
   clearTimeout(viewTimer);
   const b = curBoard(); if (!b) return;
   b.view = { ...view };
-  dbPut('boards', b);
+  dbPut('boards', b, true);   // la vista es propia de cada dispositivo: no se sincroniza
 }
 
 async function renderLayer() {
@@ -152,8 +157,8 @@ async function makeCard(it) {
   if (it.type === 'text') {
     const t = document.createElement('div');
     t.className = 'txt';
-    t.textContent = it.text || '';
     el.append(t);
+    paintText(el, it);
   } else {
     const u = await blobURL(it.blobId);
     if (!u) return null;
@@ -220,7 +225,7 @@ vp.addEventListener('pointerdown', e => {
     const wasSel = sel === id;
     select(id);
     g = { type: e.target.closest('.rs') ? 'resize' : 'drag', id, pid: e.pointerId, sx: e.clientX, sy: e.clientY,
-      ox: it.x, oy: it.y, ow: it.w, moved: false, wasSel };
+      ox: it.x, oy: it.y, ow: it.w, moved: false, wasSel, onLink: !!e.target.closest('a, .embed') };
   } else {
     select(null);
     g = { type: 'pan', pid: e.pointerId, sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y, moved: false };
@@ -257,7 +262,7 @@ function endPointer(e) {
   if (e.pointerId !== g.pid) return;
   if (g.moved) {
     if (g.type === 'pan') saveView(); else { const it = findItem(g.id); it && saveItem(it); }
-  } else if (g.type === 'drag' && g.wasSel) {
+  } else if (g.type === 'drag' && g.wasSel && !g.onLink) {
     const it = findItem(g.id);
     if (it && it.type === 'text') editText(it.id);
   }
@@ -297,9 +302,94 @@ vp.addEventListener('wheel', e => {
   applyView(); saveView();
 }, { passive: false });
 
+/* ---------- Enlaces: se pueden abrir y se reproducen dentro de la nota ---------- */
+const URL_RE = /https?:\/\/[^\s<>"]+/gi;
+function splitUrl(m) {                       // quita signos finales como "." o ")" que no son del enlace
+  const t = m.match(/[.,;:!?)\]'”»]+$/);
+  return t ? [m.slice(0, -t[0].length), t[0]] : [m, ''];
+}
+function renderText(el, text) {
+  el.textContent = '';
+  let last = 0;
+  for (const m of text.matchAll(URL_RE)) {
+    const [u] = splitUrl(m[0]);
+    if (m.index > last) el.append(text.slice(last, m.index));
+    const a = document.createElement('a');
+    a.href = u; a.textContent = u; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    el.append(a);
+    last = m.index + u.length;
+  }
+  if (last < text.length) el.append(text.slice(last));
+}
+function startSeconds(x) {                   // ?t=90 · ?t=1m30s · ?start=90
+  const t = x.searchParams.get('t') || x.searchParams.get('start') || '';
+  const m = t.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/);
+  return m ? (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0) : 0;
+}
+function frameEmbed(kind, src, thumb) {      // se carga al tocar, para no gastar datos hasta que lo pidas
+  const d = document.createElement('div');
+  d.className = 'embed ' + kind;
+  if (thumb) d.style.backgroundImage = `url("${thumb}")`;
+  d.innerHTML = '<span class="play">▶</span>';
+  d.onclick = ev => {
+    ev.stopPropagation();   // el toque es solo del reproductor (no abre la entrada del Diario)
+    if (d.querySelector('iframe')) return;
+    const f = document.createElement('iframe');
+    f.src = src;
+    f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    f.allowFullscreen = true;
+    f.referrerPolicy = 'strict-origin-when-cross-origin';
+    d.textContent = ''; d.append(f); d.classList.add('on');
+  };
+  return d;
+}
+function mediaEmbed(tag, url) {
+  const d = document.createElement('div');
+  d.className = 'embed media ' + tag;
+  const m = document.createElement(tag);
+  m.src = url;
+  if (tag === 'img') { m.loading = 'lazy'; m.alt = ''; m.draggable = false; }
+  else { m.controls = true; m.preload = 'metadata'; if (tag === 'video') m.playsInline = true; }
+  d.append(m);
+  return d;
+}
+function embedFor(text) {
+  for (const m of text.matchAll(URL_RE)) {
+    const u = splitUrl(m[0])[0];
+    let x; try { x = new URL(u); } catch { continue; }
+    const h = x.hostname.replace(/^(www|m)\./, '');
+    let id = null;
+    if (h === 'youtu.be') id = x.pathname.slice(1).split('/')[0];
+    else if (h === 'youtube.com' || h === 'youtube-nocookie.com')
+      id = x.pathname === '/watch' ? x.searchParams.get('v') : (x.pathname.match(/^\/(?:shorts|embed|live)\/([\w-]{6,})/) || [])[1];
+    if (id && /^[\w-]{6,}$/.test(id)) {
+      const st = startSeconds(x);
+      return frameEmbed('yt', `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0${st ? '&start=' + st : ''}`,
+        `https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+    }
+    if (h === 'vimeo.com') {
+      const v = x.pathname.match(/^\/(?:video\/)?(\d+)/);
+      if (v) return frameEmbed('vimeo', `https://player.vimeo.com/video/${v[1]}?autoplay=1`);
+    }
+    const ext = ((x.pathname.match(/\.([a-z0-9]+)$/i) || [])[1] || '').toLowerCase();
+    if (/^(mp4|webm|mov|m4v|ogv)$/.test(ext)) return mediaEmbed('video', u);
+    if (/^(mp3|m4a|oga|ogg|wav|aac|opus|flac)$/.test(ext)) return mediaEmbed('audio', u);
+    if (/^(jpe?g|png|gif|webp|avif|svg)$/.test(ext)) return mediaEmbed('img', u);
+  }
+  return null;
+}
+function paintText(card, it) {               // dibuja el texto con enlaces + el reproductor del primer enlace
+  const t = card.querySelector('.txt');
+  renderText(t, it.text || '');
+  card.querySelector('.embed')?.remove();
+  const em = embedFor(it.text || '');
+  if (em) t.after(em);
+}
+
 /* ---------- Texto ---------- */
 function editText(id) {
   const el = cardEl(id)?.querySelector('.txt'); if (!el) return;
+  el.textContent = findItem(id)?.text || '';   // mientras se edita se ve el texto plano
   el.contentEditable = 'true';
   el.classList.add('editing');
   el.focus();
@@ -313,6 +403,7 @@ function editText(id) {
     const t = el.innerText.replace(/\n$/, '');
     if (!t.trim()) { deleteItem(id); return; }
     if (t !== it.text) { it.text = t; await saveItem(it); }
+    const c = cardEl(id); if (c) paintText(c, it);
   };
 }
 
@@ -432,7 +523,10 @@ async function renderDiary() {
     const time = d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
     e.innerHTML = `<div class="meta"><span>${time}</span><span>· ${esc(names[it.boardId])}</span></div>`;
     const body = document.createElement('div'); body.className = 'body';
-    if (it.type === 'text') body.textContent = it.text || '';
+    if (it.type === 'text') {
+      renderText(body, it.text || '');
+      const em = embedFor(it.text || ''); if (em) body.append(em);
+    }
     else {
       const u = await blobURL(it.blobId);
       if (!u) continue;
@@ -442,7 +536,7 @@ async function renderDiary() {
       body.append(m);
     }
     e.append(body);
-    e.onclick = ev => { if (ev.target.tagName !== 'VIDEO') focusItem(it); };
+    e.onclick = ev => { if (!ev.target.closest('a, .embed, video, audio')) focusItem(it); };
     box.append(e);
   }
 }
@@ -454,6 +548,19 @@ async function focusItem(it) {
   applyView(); saveView();
   select(it.id);
 }
+
+/* ---------- Tema ---------- */
+function applyTheme(t) {
+  const r = document.documentElement;
+  if (t === 'auto') r.removeAttribute('data-theme'); else r.dataset.theme = t;
+  localStorage.setItem('theme', t);
+  document.querySelectorAll('#themeSeg button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme:dark)').matches);
+  const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = dark ? '#161615' : '#fafaf8';
+}
+document.querySelectorAll('#themeSeg button').forEach(b => b.onclick = () => applyTheme(b.dataset.t));
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change', () => applyTheme(localStorage.getItem('theme') || 'light'));
+applyTheme(localStorage.getItem('theme') || 'light');
 
 /* ---------- Menú lateral (móvil) ---------- */
 const closeDrawer = () => document.body.classList.remove('drawer');
@@ -492,13 +599,14 @@ async function importShared() {
   db = await openDB();
   boards = (await dbAll('boards')).filter(b => !b.deleted).sort((a, b) => a.created - b.created);
   allItems = (await dbAll('items')).filter(i => !i.deleted);
-  if (!boards.length) await newBoard('Mi primera pizarra');
+  if (!boards.length) await newBoard('Mi primera pizarra', true);
   const last = localStorage.getItem('lastBoard');
   await openBoard(boards.find(b => b.id === last)?.id || boards[0].id);
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   await importShared();
   window.__ready = true;
+  if (window.Sync) Sync.init();
 })();
 
 window.addEventListener('pagehide', saveViewNow);

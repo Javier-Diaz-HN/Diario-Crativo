@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#fafaf8">
+<script>
+  /* aplica el tema antes de dibujar para evitar parpadeos; por defecto: claro */
+  (function(){var t=localStorage.getItem('theme')||'light';if(t!=='auto')document.documentElement.dataset.theme=t;})();
+</script>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -15,6 +19,14 @@
   <aside id="side">
     <div class="side-head"><b>Pizarras</b><button id="newBoard" title="Nueva pizarra" aria-label="Nueva pizarra">+</button></div>
     <nav id="boards"></nav>
+    <div class="side-foot">
+      <span>Tema</span>
+      <div class="seg" id="themeSeg">
+        <button data-t="light">Claro</button>
+        <button data-t="dark">Oscuro</button>
+        <button data-t="auto">Auto</button>
+      </div>
+    </div>
   </aside>
   <div id="scrim"></div>
 
@@ -26,6 +38,7 @@
         <button id="tabBoard" class="on">Pizarra</button>
         <button id="tabDiary">Diario</button>
       </div>
+      <button id="syncBtn" data-state="off" aria-label="Sincronización" title="Sincronización">☁</button>
       <button id="more" aria-label="Eliminar pizarra" title="Eliminar pizarra">🗑</button>
     </header>
 
@@ -50,10 +63,30 @@
   </main>
 </div>
 
+<div id="syncModal" hidden>
+  <div class="sheet">
+    <h3>Sincronización</h3>
+    <p id="syncMsg"></p>
+    <form id="loginForm" hidden>
+      <input id="syEmail" type="email" placeholder="Correo" autocomplete="username" required>
+      <input id="syPass" type="password" placeholder="Contraseña" autocomplete="current-password" required>
+      <button class="primary">Entrar</button>
+    </form>
+    <div id="syncActions" hidden>
+      <button id="syncNow" class="primary">Sincronizar ahora</button>
+      <button id="syncOut">Cerrar sesión</button>
+    </div>
+    <button id="syncClose" class="ghost">Cerrar</button>
+  </div>
+</div>
+
 <input type="file" id="fileImg" accept="image/*" multiple hidden>
 <input type="file" id="fileVid" accept="video/*" multiple hidden>
 <input type="file" id="fileCam" accept="image/*" capture="environment" hidden>
 
+<script src="config.js"></script>
+<script src="supabase.js"></script>
+<script src="sync.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
