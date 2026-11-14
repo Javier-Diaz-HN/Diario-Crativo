@@ -27,6 +27,11 @@ create table if not exists public.items (
   srv       timestamptz not null default now()
 );
 
+-- Conectores entre tarjetas (si ya habías ejecutado este script antes, estas 3 líneas añaden lo nuevo)
+alter table public.items add column if not exists src   text;
+alter table public.items add column if not exists dst   text;
+alter table public.items add column if not exists arrow boolean not null default false;
+
 create index if not exists boards_user_srv on public.boards (user_id, srv);
 create index if not exists items_user_srv  on public.items  (user_id, srv);
 

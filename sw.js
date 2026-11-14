@@ -1,4 +1,4 @@
-const CACHE = 'diario-v3';
+const CACHE = 'diario-v4';
 const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'manifest.json', 'icon-192.png', 'icon-512.png', 'config.js', 'supabase.js', 'sync.js'];
 
 self.addEventListener('install', e => {

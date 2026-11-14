@@ -38,11 +38,13 @@
   const toRB = b => ({ id: b.id, name: b.name, created: b.created, updated: b.updated, deleted: !!b.deleted });
   const toRI = i => ({
     id: i.id, board_id: i.boardId, type: i.type, x: i.x, y: i.y, w: i.w, text: i.text ?? null,
-    blob_id: i.blobId ?? null, created: i.created, updated: i.updated, deleted: !!i.deleted
+    blob_id: i.blobId ?? null, src: i.a ?? null, dst: i.b ?? null, arrow: !!i.arrow,
+    created: i.created, updated: i.updated, deleted: !!i.deleted
   });
   const fromRI = r => ({
     id: r.id, boardId: r.board_id, type: r.type, x: r.x, y: r.y, w: r.w, text: r.text ?? undefined,
-    blobId: r.blob_id ?? undefined, created: Number(r.created), updated: Number(r.updated), deleted: !!r.deleted
+    blobId: r.blob_id ?? undefined, a: r.src ?? undefined, b: r.dst ?? undefined, arrow: !!r.arrow,
+    created: Number(r.created), updated: Number(r.updated), deleted: !!r.deleted
   });
   const tooBig = e => e && (/exceed|too large|payload|size/i.test(e.message || '') || e.statusCode == 413 || e.status == 413);
 

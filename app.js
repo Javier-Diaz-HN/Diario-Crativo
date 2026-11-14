@@ -127,6 +127,7 @@ function applyView() {
   const s = 24 * view.k;
   vp.style.backgroundSize = `${s}px ${s}px`;
   vp.style.backgroundPosition = `${view.x}px ${view.y}px`;
+  placeBar();
 }
 
 let viewTimer;
@@ -139,12 +140,13 @@ function saveViewNow() {
 }
 
 async function renderLayer() {
-  layer.innerHTML = '';
-  const list = allItems.filter(i => i.boardId === cur);
+  layer.querySelectorAll('.card').forEach(c => c.remove());
+  const list = allItems.filter(i => i.boardId === cur && i.type !== 'conn');
   const els = await Promise.all(list.map(makeCard));
   els.forEach(e => e && layer.append(e));
   $('#empty').hidden = list.length > 0;
   applyView();
+  drawLines();
 }
 
 async function makeCard(it) {
@@ -171,12 +173,19 @@ async function makeCard(it) {
   const rs = document.createElement('div'); rs.className = 'rs';
   const del = document.createElement('button'); del.className = 'del'; del.textContent = '×'; del.setAttribute('aria-label', 'Eliminar');
   del.onclick = () => deleteItem(it.id);
-  el.append(rs, del);
+  const tools = document.createElement('div');
+  tools.className = 'tools';
+  tools.innerHTML = '<button class="t-conn">Conectar</button><button class="t-child">+ Idea</button>';
+  tools.querySelector('.t-conn').onclick = () => startConnect(it.id);
+  tools.querySelector('.t-child').onclick = () => addChild(it.id);
+  el.append(rs, del, tools);
+  ro.observe(el);                           // si la tarjeta cambia de alto (foto cargada, texto), la línea la sigue
   if (it.id === sel) el.classList.add('sel');
   return el;
 }
 
 function select(id) {
+  if (selConn) selectConn(null);
   sel = id;
   document.querySelectorAll('.card.sel').forEach(c => c.classList.remove('sel'));
   if (id) cardEl(id)?.classList.add('sel');
@@ -196,11 +205,19 @@ async function removeItemData(it) {
 
 async function deleteItem(id) {
   const it = findItem(id); if (!it) return;
+  if (it.type !== 'conn') {
+    for (const c of allItems.filter(i => i.type === 'conn' && (i.a === id || i.b === id))) {
+      allItems = allItems.filter(i => i !== c);
+      await removeItemData(c);
+    }
+  }
   cardEl(id)?.remove();
   allItems = allItems.filter(i => i.id !== id);
   if (sel === id) sel = null;
+  if (selConn === id) selConn = null;
   await removeItemData(it);
-  $('#empty').hidden = allItems.some(i => i.boardId === cur);
+  $('#empty').hidden = allItems.some(i => i.boardId === cur && i.type !== 'conn');
+  drawLines();
 }
 
 function viewCenter() {
@@ -213,12 +230,21 @@ let g = null;
 
 vp.addEventListener('pointerdown', e => {
   if (e.target.closest('.txt.editing')) return;
+  if (e.target.closest('#cbar, #hint')) return;
   const ae = document.activeElement;
   if (ae && ae.classList && ae.classList.contains('editing')) ae.blur();
+  if (connectFrom) {                          // modo conectar: el siguiente toque elige la tarjeta destino
+    const card = e.target.closest('.card'), from = connectFrom;
+    endConnect();
+    if (card && card.dataset.id !== from) addConn(from, card.dataset.id);
+    return;
+  }
+  const cn = e.target.closest('.cn');         // tocar una línea la selecciona
+  if (cn) { select(null); selectConn(cn.dataset.id); return; }
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (ptrs.size === 2) { startPinch(); return; }
   if (ptrs.size > 2) return;
-  if (e.target.closest('.del')) return;
+  if (e.target.closest('.del, .tools')) return;
   const card = e.target.closest('.card');
   if (card) {
     const id = card.dataset.id, it = findItem(id);
@@ -249,9 +275,11 @@ vp.addEventListener('pointermove', e => {
   if (g.type === 'drag') {
     it.x = g.ox + dx / view.k; it.y = g.oy + dy / view.k;
     el.style.left = it.x + 'px'; el.style.top = it.y + 'px';
+    scheduleLines();
   } else {
     it.w = Math.max(90, g.ow + dx / view.k);
     el.style.width = it.w + 'px';
+    scheduleLines();
   }
 });
 
@@ -301,6 +329,109 @@ vp.addEventListener('wheel', e => {
   view.k = k;
   applyView(); saveView();
 }, { passive: false });
+
+/* ---------- Conectores: unir tarjetas con líneas para armar mapas ---------- */
+const SVGNS = 'http://www.w3.org/2000/svg';
+let selConn = null, connectFrom = null, selMid = null, linesQueued = false;
+const ro = new ResizeObserver(() => scheduleLines());
+
+function scheduleLines() {
+  if (linesQueued) return;
+  linesQueued = true;
+  requestAnimationFrame(() => { linesQueued = false; drawLines(); });
+}
+function edge(r, d) {                         // punto medio de un lado de la tarjeta + hacia dónde sale la línea
+  if (d === 'r') return { x: r.x + r.w, y: r.y + r.h / 2, dx: 1, dy: 0 };
+  if (d === 'l') return { x: r.x, y: r.y + r.h / 2, dx: -1, dy: 0 };
+  if (d === 'b') return { x: r.x + r.w / 2, y: r.y + r.h, dx: 0, dy: 1 };
+  return { x: r.x + r.w / 2, y: r.y, dx: 0, dy: -1 };
+}
+function geometry(ra, rb) {
+  const dx = (rb.x + rb.w / 2) - (ra.x + ra.w / 2), dy = (rb.y + rb.h / 2) - (ra.y + ra.h / 2);
+  let da, db;
+  if (Math.abs(dx) * (ra.h + rb.h) >= Math.abs(dy) * (ra.w + rb.w)) [da, db] = dx >= 0 ? ['r', 'l'] : ['l', 'r'];
+  else [da, db] = dy >= 0 ? ['b', 't'] : ['t', 'b'];
+  const p1 = edge(ra, da), p2 = edge(rb, db);
+  const d = clamp(Math.hypot(p2.x - p1.x, p2.y - p1.y) / 2.5, 30, 170);
+  return { p1, p2, c1: { x: p1.x + p1.dx * d, y: p1.y + p1.dy * d }, c2: { x: p2.x + p2.dx * d, y: p2.y + p2.dy * d } };
+}
+function svgPath(d, cls) {
+  const p = document.createElementNS(SVGNS, 'path');
+  p.setAttribute('d', d); p.setAttribute('class', cls);
+  return p;
+}
+function drawLines() {
+  const svg = $('#lines'); if (!svg) return;
+  svg.textContent = '';
+  selMid = null;
+  for (const c of allItems) {
+    if (c.type !== 'conn' || c.boardId !== cur) continue;
+    const a = findItem(c.a), b = findItem(c.b), ea = a && cardEl(c.a), eb = b && cardEl(c.b);
+    if (!ea || !eb) continue;
+    const m = geometry({ x: a.x, y: a.y, w: a.w, h: ea.offsetHeight }, { x: b.x, y: b.y, w: b.w, h: eb.offsetHeight });
+    const d = `M${m.p1.x} ${m.p1.y} C${m.c1.x} ${m.c1.y} ${m.c2.x} ${m.c2.y} ${m.p2.x} ${m.p2.y}`;
+    const gr = document.createElementNS(SVGNS, 'g');
+    gr.setAttribute('class', 'cn' + (c.id === selConn ? ' sel' : ''));
+    gr.dataset.id = c.id;
+    gr.append(svgPath(d, 'hit'), svgPath(d, 'ln'));
+    if (c.arrow) {                            // punta de flecha en el extremo final
+      const ux = -m.p2.dx, uy = -m.p2.dy, bx = m.p2.x - ux * 13, by = m.p2.y - uy * 13, px = -uy * 6.5, py = ux * 6.5;
+      gr.append(svgPath(`M${m.p2.x} ${m.p2.y} L${bx + px} ${by + py} L${bx - px} ${by - py}Z`, 'ah'));
+    }
+    svg.append(gr);
+    if (c.id === selConn) selMid = { x: (m.p1.x + 3 * m.c1.x + 3 * m.c2.x + m.p2.x) / 8, y: (m.p1.y + 3 * m.c1.y + 3 * m.c2.y + m.p2.y) / 8 };
+  }
+  if (!selMid && selConn && !findItem(selConn)) selConn = null;
+  const sc = selConn && findItem(selConn);
+  if (sc) $('#cArrow').textContent = sc.arrow ? 'Quitar flecha' : 'Flecha';
+  placeBar();
+}
+function placeBar() {
+  const bar = $('#cbar'); if (!bar) return;
+  bar.hidden = !selMid;
+  if (selMid) { bar.style.left = (view.x + selMid.x * view.k) + 'px'; bar.style.top = (view.y + selMid.y * view.k) + 'px'; }
+}
+function selectConn(id) { selConn = id; drawLines(); }
+
+async function addConn(a, b, pick = true) {
+  if (!findItem(a) || !findItem(b)) return null;
+  const dup = allItems.find(i => i.type === 'conn' && i.boardId === cur && ((i.a === a && i.b === b) || (i.a === b && i.b === a)));
+  if (dup) { if (pick) { select(null); selectConn(dup.id); } return dup; }
+  const c = { id: uid(), boardId: cur, type: 'conn', a, b, arrow: false, x: 0, y: 0, w: 0, created: now(), updated: now() };
+  allItems.push(c);
+  if (pick) { select(null); selConn = c.id; }
+  drawLines();
+  await dbPut('items', c);
+  return c;
+}
+function startConnect(id) {
+  connectFrom = id;
+  document.body.classList.add('connecting');
+  $('#hint').hidden = false;
+}
+function endConnect() {
+  connectFrom = null;
+  document.body.classList.remove('connecting');
+  $('#hint').hidden = true;
+}
+async function addChild(id) {                 // "+ Idea": tarjeta nueva a la derecha, ya unida, lista para escribir
+  const src = findItem(id); if (!src) return;
+  const kids = allItems.filter(i => i.type === 'conn' && i.a === id).length;
+  const it = { id: uid(), boardId: cur, type: 'text', x: src.x + src.w + 90, y: src.y + kids * 110, w: 220, text: '', created: now(), updated: now() };
+  allItems.push(it);
+  layer.append(await makeCard(it));
+  $('#empty').hidden = true;
+  select(it.id);
+  editText(it.id);
+  await dbPut('items', it);
+  await addConn(id, it.id, false);
+}
+$('#hintCancel').onclick = endConnect;
+$('#cArrow').onclick = async () => {
+  const c = findItem(selConn); if (!c) return;
+  c.arrow = !c.arrow; await saveItem(c); drawLines();
+};
+$('#cDel').onclick = () => { if (selConn) deleteItem(selConn); };
 
 /* ---------- Enlaces: se pueden abrir y se reproducen dentro de la nota ---------- */
 const URL_RE = /https?:\/\/[^\s<>"]+/gi;
@@ -482,8 +613,11 @@ vp.addEventListener('drop', async e => {
 });
 
 document.addEventListener('keydown', e => {
-  if (mode !== 'board' || !sel) return;
+  if (e.key === 'Escape' && connectFrom) { endConnect(); return; }
+  if (mode !== 'board') return;
   if (e.target.closest?.('.txt.editing') || e.target.id === 'boardName') return;
+  if (selConn && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); deleteItem(selConn); return; }
+  if (!sel) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteItem(sel); }
 });
 
@@ -507,7 +641,7 @@ async function renderDiary() {
   box.innerHTML = '';
   const f = $('#diaryFilter').value;
   const names = Object.fromEntries(boards.map(b => [b.id, b.name]));
-  const list = allItems.filter(i => names[i.boardId] !== undefined && (!f || i.boardId === f))
+  const list = allItems.filter(i => i.type !== 'conn' && names[i.boardId] !== undefined && (!f || i.boardId === f))
     .sort((a, b) => b.created - a.created);
   if (!list.length) { box.innerHTML = '<div class="diary-empty">Aún no hay entradas.</div>'; return; }
   let day = '';
